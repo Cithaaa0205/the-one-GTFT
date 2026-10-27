@@ -1,0 +1,5 @@
+[INFO] Starting DTNSim...
+[INFO] Running with memory limit: 2048M
+[INFO] Classpath: target:lib/DTNConsoleConnection.jar:lib/ECLA.jar:lib/fastjson-1.2.7.jar:lib/jFuzzyLogic.jar:lib/junit-4.10-extended-1.0.4.jar:lib/junit-4.10.jar:lib/lombok.jar:lib/uncommons-maths-1.2.1.jar
+[INFO] Main class: core.DTNSim
+[INFO] Execution completed successfully.
