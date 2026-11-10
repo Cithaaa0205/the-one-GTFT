@@ -1,8 +1,10 @@
-@echo off
-:: ^Turn on echo if you need to debug
-setlocal EnableDelayedExpansion
 
-:: Configuration variables - easier to modify
+@echo off
+setlocal EnableExtensions EnableDelayedExpansion
+
+:: Always run from the project directory
+pushd "%~dp0"
+
 set "targetdir=target"
 set "srcdir=src"
 set "libdir=lib"
@@ -10,71 +12,92 @@ set "resourcesdir=src\gui\buttonGraphics"
 
 echo [INFO] Starting build process...
 
-:: Create target directory if it doesn't exist
-IF NOT EXIST "%targetdir%" (
-    echo [INFO] Creating target directory...
-    mkdir "%targetdir%" || (
+:: Create target directory
+if not exist "%targetdir%" (
+    mkdir "%targetdir%"
+    if errorlevel 1 (
         echo [ERROR] Failed to create target directory.
+        popd
         exit /b 1
     )
 )
 
-:: Build classpath from all JAR files
+:: Build classpath
 echo [INFO] Building classpath...
-set "CLASSPATH="
-if NOT EXIST "%libdir%" (
-    echo [WARNING] Library directory '%libdir%' not found. Continuing without external libraries.
-) else (
-    for %%f in (%libdir%\*.jar) do (
-        if defined CLASSPATH (
-            set "CLASSPATH=!CLASSPATH!;%%f"
-        ) else (
-            set "CLASSPATH=%%f"
+set "CLASSPATH=."
+
+if exist "%libdir%" (
+    for %%f in ("%libdir%\*.jar") do (
+        if exist "%%~f" (
+            set "CLASSPATH=!CLASSPATH!;%%~f"
         )
     )
 )
 
-:: Verify source directory exists
-if NOT EXIST "%srcdir%" (
-    echo [ERROR] Source directory '%srcdir%' not found.
+:: Verify source directory
+if not exist "%srcdir%" (
+    echo [ERROR] Source directory not found.
+    popd
     exit /b 1
 )
 
-:: Collect all Java source files
+:: Collect source files
 echo [INFO] Collecting Java source files...
-dir /s /b "%srcdir%\*.java" > sources.txt 2>nul
+
+if exist sources.txt del sources.txt
+
+for /r "%srcdir%" %%f in (*.java) do (
+    set "filepath=%%~f"
+    set "filepath=!filepath:\=/!"
+    echo "!filepath!" >> sources.txt
+)
+
 if not exist sources.txt (
-    echo [ERROR] No Java source files found in '%srcdir%'.
+    echo [ERROR] No Java source files found.
+    popd
     exit /b 1
 )
 
-:: Compile the sources
-echo [INFO] Compiling Java sources...
-javac -sourcepath "%srcdir%" -d "%targetdir%" -cp "%CLASSPATH%" @sources.txt
-if %ERRORLEVEL% NEQ 0 (
-    echo [ERROR] Compilation failed with error code %ERRORLEVEL%.
-    del sources.txt 2>nul
-    exit /b %ERRORLEVEL%
+for %%A in (sources.txt) do (
+    if %%~zA EQU 0 (
+        echo [ERROR] Source list is empty.
+        del sources.txt
+        popd
+        exit /b 1
+    )
 )
 
-:: Clean up the sources list
-del sources.txt 2>nul
+:: Compile
+echo [INFO] Compiling Java sources...
 
-:: Copy resources if they exist
+javac -sourcepath "%srcdir%" -d "%targetdir%" -cp "%CLASSPATH%" @sources.txt
+
+if errorlevel 1 (
+    echo [ERROR] Compilation failed.
+    echo [INFO] sources.txt is preserved for debugging.
+    popd
+    exit /b 1
+)
+
+:: Remove source list after successful compilation
+del sources.txt
+
+:: Copy resources
 if exist "%resourcesdir%" (
     echo [INFO] Copying resources...
-    if not exist "%targetdir%\gui\buttonGraphics\" (
-        mkdir "%targetdir%\gui\buttonGraphics" || (
-            echo [WARNING] Failed to create resource directory in target. Resources may not be copied.
-        )
+
+    if not exist "%targetdir%\gui\buttonGraphics" (
+        mkdir "%targetdir%\gui\buttonGraphics"
     )
+
     xcopy /y /q "%resourcesdir%\*" "%targetdir%\gui\buttonGraphics\" >nul
-    if %ERRORLEVEL% NEQ 0 (
-        echo [WARNING] Some resources may not have been copied properly.
-    ) else (
-        echo [INFO] Resources copied successfully.
+
+    if errorlevel 1 (
+        echo [WARNING] Some resources may not have been copied.
     )
 )
 
 echo [INFO] Build completed successfully!
+
+popd
 endlocal
