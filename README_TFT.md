@@ -4,7 +4,7 @@ Satu repository untuk dua skripsi:
 
 | Bagian | Pemilik | Isi |
 |---|---|---|
-| **Baseline** | Rekan | Replikasi incentive-aware routing Shevade dkk. (2008) di jaringan manusia |
+| **Baseline** | Angel | Replikasi incentive-aware routing Shevade dkk. (2008) di jaringan manusia |
 | **Hub-aware** | Citha | Generosity adaptif `epsilon = floor(epsBase * S * K)` di atas baseline |
 | **Bersama** | Berdua | Control plane, laporan metrik, parameter skenario |
 
