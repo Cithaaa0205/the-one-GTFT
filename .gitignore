@@ -9,3 +9,8 @@
 
 # Ignore Gradle build output directory
 build
+
+# Penelitian payung TFT
+sources.txt
+data/events/tft_hub_trace_s*.txt
+desktop.ini
