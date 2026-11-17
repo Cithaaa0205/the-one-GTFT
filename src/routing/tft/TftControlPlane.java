@@ -28,7 +28,7 @@ import core.SimClock;
  * Komponen BERSAMA baseline dan skema turunan. Setting (namespace
  * TftControlPlane): interval, degreeWindow, relayCapacity, loadMetric.
  */
-public class TftControlPlane {
+public class TftControlPlane implements LinkStateView {
 
 	static {
 		DTNSim.registerForReset(TftControlPlane.class.getCanonicalName());
@@ -56,6 +56,25 @@ public class TftControlPlane {
 	private final double degreeWindow;
 	private final double capacity;
 	private final String loadMetric;
+	/**
+	 * "distributed" (default, sesuai paper: link state dan ACK per node, menyebar
+	 * lewat kontak) atau "ideal" (snapshot global, hanya untuk cek internal).
+	 */
+	private final String linkStateMode;
+	/** bobot EWMA untuk nilai baru (paper: 0,8); hanya mode distributed */
+	private final double ewmaAlpha;
+	/** ukuran paket (byte) untuk mengubah kecepatan link menjadi paket/detik */
+	private final double packetSize;
+	/** umur maksimum ACK (detik) sebelum berhenti di-flood */
+	private final double ackTtl;
+	/**
+	 * Kredit yang dipakai relay saat menegakkan TFT: "previous" = ACK interval t-1
+	 * (rancangan proposal), "current" = ACK yang sudah diterima pada interval
+	 * berjalan (bunyi aturan penolakan di Bagian V paper).
+	 */
+	private final String enforceWindow;
+	/** jumlah pengiriman ACK antar node (overhead ACK flooding) */
+	private long ackTransmissions = 0;
 
 	private TftControlPlane() {
 		Settings s = new Settings(NS);
@@ -63,12 +82,27 @@ public class TftControlPlane {
 		degreeWindow = s.getDouble("degreeWindow", 3600);
 		capacity = s.getDouble("relayCapacity", 20);
 		loadMetric = s.getSetting("loadMetric", "interval").trim();
+		linkStateMode = s.getSetting("linkStateMode", "distributed").trim();
+		ackTtl = s.getDouble("ackTtl", 7200);
+		enforceWindow = s.getSetting("enforceWindow", "previous").trim();
+		ewmaAlpha = s.getDouble("ewmaAlpha", 0.8);
+		packetSize = s.getDouble("packetSize", 10000);
 		nextBoundary = interval;
 	}
 
 	public double getInterval() { return interval; }
 	/** Kapasitas relay C (paket per interval atau paket buffer, sesuai loadMetric). */
 	public double getCapacity() { return capacity; }
+	public double getDegreeWindow() { return degreeWindow; }
+	public boolean isDistributedLinkState() { return "distributed".equalsIgnoreCase(linkStateMode); }
+	public double getEwmaAlpha() { return ewmaAlpha; }
+	public double getPacketSize() { return packetSize; }
+	public double getAckTtl() { return ackTtl; }
+	public boolean enforceWithCurrentCredit() { return "current".equalsIgnoreCase(enforceWindow); }
+	public void countAckTransmission() { ackTransmissions++; }
+	public long getAckTransmissions() { return ackTransmissions; }
+	/** true bila beban relay dihitung sebagai paket relay per interval */
+	public boolean isIntervalLoad() { return "interval".equals(loadMetric); }
 
 	// ------------------------------------------------------------------
 	// Registrasi router
@@ -103,6 +137,8 @@ public class TftControlPlane {
 	private final Map<Long, Double> lastContact = new HashMap<>();
 	/** total tetangga unik sepanjang simulasi, untuk definisi hub di laporan */
 	private final Map<Integer, java.util.Set<Integer>> everMet = new HashMap<>();
+	/** jumlah kontak (event up) per node, untuk laporan */
+	private final Map<Integer, Integer> contactCount = new HashMap<>();
 
 	private static long key(int a, int b) {
 		int lo = Math.min(a, b), hi = Math.max(a, b);
@@ -125,6 +161,8 @@ public class TftControlPlane {
 		h.up = true;
 		h.lastUp = now;
 		lastContact.put(key(a, b), now);
+		contactCount.merge(a, 1, Integer::sum);
+		contactCount.merge(b, 1, Integer::sum);
 		everMet.computeIfAbsent(a, k -> new java.util.HashSet<>()).add(b);
 		everMet.computeIfAbsent(b, k -> new java.util.HashSet<>()).add(a);
 	}
@@ -243,6 +281,7 @@ public class TftControlPlane {
 	// ------------------------------------------------------------------
 	// Kueri untuk source dan relay
 	// ------------------------------------------------------------------
+	@Override
 	public List<Integer> neighbors(int node) {
 		return snapAdj.getOrDefault(node, java.util.Collections.emptyList());
 	}
@@ -252,14 +291,17 @@ public class TftControlPlane {
 	}
 
 	/** {mean, var} waktu tunggu link, atau null bila link belum pernah teramati */
+	@Override
 	public double[] linkStats(int a, int b) {
 		return snapLinkStats.get(key(a, b));
 	}
 
+	@Override
 	public int degree(int node) {
 		return snapDegree.getOrDefault(node, 0);
 	}
 
+	@Override
 	public int load(int node) {
 		return snapLoad.getOrDefault(node, 0);
 	}
@@ -267,6 +309,11 @@ public class TftControlPlane {
 	/** Kredit upstream A di relay B: paket yang direlai A untuk B pada t-1. */
 	public int creditOf(int upstreamA, int relayB) {
 		return snapCredit.getOrDefault(dirKey(upstreamA, relayB), 0);
+	}
+
+	/** Kredit dari ACK yang sudah tercatat pada interval berjalan (mode ideal). */
+	public int creditNow(int upstreamA, int relayB) {
+		return curCredit.getOrDefault(dirKey(upstreamA, relayB), 0);
 	}
 
 	/** T(B,A) pada interval berjalan. */
@@ -304,6 +351,11 @@ public class TftControlPlane {
 			m.put(e.getKey(), e.getValue().size());
 		}
 		return m;
+	}
+
+	/** Jumlah kontak (event up) per node selama simulasi. */
+	public Map<Integer, Integer> totalContacts() {
+		return new HashMap<>(contactCount);
 	}
 
 	public List<Map<Integer, Double>> getUtilHistory() {

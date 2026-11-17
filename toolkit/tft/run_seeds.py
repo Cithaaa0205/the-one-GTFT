@@ -20,6 +20,11 @@ ap.add_argument("--load", default="interval", choices=["interval", "buffer"])
 ap.add_argument("--replan", default="true", choices=["true", "false"])
 ap.add_argument("--capacity", default="20")
 ap.add_argument("--one", default="bash one.sh")
+ap.add_argument("--extra", default="")
+ap.add_argument("--haggle", action="store_true", help="sama dengan --trace haggle")
+ap.add_argument("--proactive-only", action="store_true", help="keluarga hubaware hanya menjalankan PROACTIVE (mis. untuk replan saat kontak)")
+ap.add_argument("--trace", default="sintetis", choices=["sintetis", "haggle", "reality", "reality_aktif"], help="haggle/reality: trace manusia; seed hanya mengubah pembangkitan pesan")
+ap.add_argument("--tag", default="")
 ap.add_argument("--only", default="all", choices=["all", "baseline", "hubaware"])
 a = ap.parse_args()
 
@@ -29,20 +34,24 @@ FAMILIES = {
     "hubaware": (os.path.join("settings", "hubaware", "hubaware.cfg"), 4),
 }
 
-tag = f"{a.load}_replan{a.replan}_C{a.capacity}"
+if a.haggle:
+    a.trace = "haggle"
+tag = ("" if a.trace == "sintetis" else a.trace + "_") + f"{a.load}_replan{a.replan}_C{a.capacity}{a.tag}"
 outdir = os.path.join("reports", "tft_seeds", tag)
 os.makedirs(outdir, exist_ok=True)
 
 for seed in range(1, a.seeds + 1):
     trace = os.path.join("data", "events", f"tft_hub_trace_s{seed}.txt")
-    with open(trace, "w") as fh:
-        subprocess.run([sys.executable, os.path.join("toolkit", "tft", "gen_hub_trace.py"),
-                        "12", "43200", str(seed)], stdout=fh, check=True)
+    if a.trace == "sintetis":
+        with open(trace, "w") as fh:
+            subprocess.run([sys.executable, os.path.join("toolkit", "tft", "gen_hub_trace.py"),
+                            "12", "43200", str(seed)], stdout=fh, check=True)
     seed_dir = os.path.join(outdir, f"seed{seed}")
     os.makedirs(seed_dir, exist_ok=True)
     cfg = os.path.join(seed_dir, "seed.cfg")
     with open(cfg, "w") as fh:
-        fh.write(f"Events1.filePath = {trace}\n".replace("\\", "/"))
+        if a.trace == "sintetis":
+            fh.write(f"Events1.filePath = {trace}\n".replace("\\", "/"))
         fh.write(f"Events2.prefix = M{seed}_\n")
         fh.write(f"TftControlPlane.loadMetric = {a.load}\n")
         fh.write(f"TftControlPlane.relayCapacity = {a.capacity}\n")
@@ -51,7 +60,15 @@ for seed in range(1, a.seeds + 1):
     for fam, (fcfg, n) in FAMILIES.items():
         if a.only not in ("all", fam):
             continue
-        cmd = f"{a.one} -b {n} {COMMON} {fcfg} {cfg}"
+        tcfg = "" if a.trace == "sintetis" else os.path.join("settings", "common", f"trace_{a.trace}.cfg")
+        extra = a.extra
+        if a.proactive_only and fam == "hubaware":
+            n = 1
+            pcfg = os.path.join(seed_dir, "proactive_only.cfg")
+            with open(pcfg, "w") as fh:
+                fh.write("HubAwareTftRouter.variant = PROACTIVE\n")
+            extra = f"{a.extra} {pcfg}"
+        cmd = f"{a.one} -b {n} {COMMON} {fcfg} {tcfg} {extra} {cfg}"
         subprocess.run(cmd, shell=True, check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 

@@ -4,7 +4,7 @@ Satu repository untuk dua skripsi:
 
 | Bagian | Pemilik | Isi |
 |---|---|---|
-| **Baseline** | Angel | Replikasi incentive-aware routing Shevade dkk. (2008) di jaringan manusia |
+| **Baseline** | Rekan | Replikasi incentive-aware routing Shevade dkk. (2008) di jaringan manusia |
 | **Hub-aware** | Citha | Generosity adaptif `epsilon = floor(epsBase * S * K)` di atas baseline |
 | **Bersama** | Berdua | Control plane, laporan metrik, parameter skenario |
 
@@ -97,29 +97,78 @@ terakhir perintah `one.bat`.
 `hub_share`, `hub_utilization`, serta per node: `unique_contacts`,
 `relay_load`, `planned_by_sources`, `avg_eps_checked`, `tft_denials`.
 
-## Hasil acuan (trace sintetis, 5 seed, beban per interval, C = 20)
+## Mode control plane
+
+- **distributed (default, sesuai paper).** Setiap node punya tabel link state
+  sendiri (EWMA, link baru diumumkan setelah satu siklus OFF lengkap) yang
+  ditukar saat kontak. Tujuan membuat ACK berisi rute yang dilalui pesan, lalu
+  ACK disebar secara store-carry-forward: hanya antara dua node yang sedang
+  berkontak, paling jauh satu hop per langkah simulasi. ACK yang baru diterima
+  baru diteruskan pada langkah berikutnya, baik lewat pertukaran saat kontak
+  dimulai maupun lewat kontak yang sedang berlangsung (aturan waktu yang sama). Setiap node menghitung kredit TFT dari ACK yang
+  sudah sampai kepadanya (`NodeAckState`); kredit dari ACK yang diterima pada
+  interval t-1 dipakai pada interval t. Derajat dan beban relay (khusus
+  hub-aware) ikut menyebar bersama tabel link state.
+- **ideal (cek internal saja).** `settings/common/control_ideal.cfg`. Semua
+  informasi diketahui semua node pada batas interval tanpa keterlambatan. Tidak
+  sesuai paper; dipakai untuk uji regresi dan mengukur pengaruh keterlambatan.
+
+Setting terkait (namespace `TftControlPlane`): `linkStateMode`
+(`distributed`/`ideal`), `ewmaAlpha` (0,8), `ackTtl` (7200 detik),
+`enforceWindow` (`previous` = kredit dari ACK interval t-1, sesuai proposal;
+`current` = kredit dari ACK yang sudah diterima pada interval berjalan, sesuai
+bunyi aturan penolakan di Bagian V paper).
+
+## Hasil acuan (trace sintetis, 5 seed, beban per interval, C = 20, mode distributed)
 
 Dipakai sebagai uji regresi: setelah mengubah kode, hasil skenario yang sama
 harus tetap sama kecuali perubahannya memang disengaja.
 
-| Skema | Delivery | Dibuang | Gini semua | Gini antar-hub | Beban maks. |
-|---|---|---|---|---|---|
-| baseline_COOP_NOTFT | 0,974 | 0 | 0,900 | 0,447 | 1338 |
-| baseline_SELFISH_NOTFT | 0,162 | 0 | 0,000 | 0,000 | 0 |
-| baseline_GTFT | 0,841 | 155 | 0,785 | 0,232 | 911 |
-| hubaware_REACTIVE | 0,722 | 329 | 0,768 | 0,187 | 735 |
-| hubaware_PROACTIVE | 0,928 | 38 | 0,826 | 0,185 | 912 |
-| hubaware_S_ONLY | 0,968 | 8 | 0,892 | 0,415 | 1288 |
-| hubaware_K_ONLY | 0,580 | 272 | 0,603 | 0,156 | 495 |
+| Skema | Delivery | Dibuang | Gini semua | Gini antar-hub | Beban maks. | ACK dikirim |
+|---|---|---|---|---|---|---|
+| baseline_COOP_NOTFT | 0,970 | 0 | 0,883 | 0,386 | 1260 | 15429 |
+| baseline_SELFISH_NOTFT | 0,162 | 0 | 0,000 | 0,000 | 0 | 2570 |
+| baseline_GTFT | 0,834 | 148 | 0,782 | 0,219 | 886 | 13283 |
+| hubaware_REACTIVE | 0,726 | 308 | 0,768 | 0,176 | 724 | 11557 |
+| hubaware_PROACTIVE | 0,722 | 345 | 0,803 | 0,163 | 684 | 11498 |
+| hubaware_PROACTIVE + replan saat kontak | 0,885 | 87 | 0,803 | 0,180 | 862 | 14099 |
+| hubaware_S_ONLY | 0,957 | 18 | 0,878 | 0,361 | 1205 | 15228 |
+| hubaware_K_ONLY | 0,555 | 291 | 0,625 | 0,157 | 474 | 8843 |
+
+Dengan `enforceWindow = current` hasilnya hampir sama (GTFT 0,835; PROACTIVE
+dengan replan saat kontak 0,884).
+
+Dengan `ShevadeTftRouter.repFactor = 3`: GTFT 0,789 (beban maks. 968, Gini
+antar-hub 0,173); PROACTIVE + replan saat kontak 0,843 (beban maks. 1178, Gini
+antar-hub 0,167).
+
+Mode ideal (cek internal), untuk perbandingan: GTFT 0,841; REACTIVE 0,722;
+PROACTIVE 0,928. Laporan mode ideal identik dengan kode sebelum ACK distributed
+ditambahkan (kecuali baris baru `control_mode` dan `ack_transmissions`).
+
+### Replan saat kontak (modifikasi, bukan bagian paper)
+
+Di mode distributed, source hanya tahu beban dan derajat relay dari tabel yang
+ia terima lewat kontak, jadi infonya bisa basi. PROACTIVE lalu menghitung
+epsilon berbeda dari yang ditegakkan relay dan banyak pesan ditolak. Setting
+`HubAwareTftRouter.replanOnContact = true`
+(`settings/hubaware/replan_on_contact.cfg`) membuat source langsung memakai tabel
+baru itu untuk merencanakan ulang pesan miliknya. Kuota TFTCap yang sudah
+dipesan pesan yang masih menunggu dilepas dulu agar tidak terhitung dua kali.
+Paper hanya menjalankan Fig. 4 di awal interval, jadi ini termasuk modifikasi
+hub-aware. GTFT baseline tidak memakainya.
 
 ## Penyederhanaan yang masih ada (TODO)
 
 Baseline:
 1. Contrition belum diimplementasikan.
-2. Prediksi link memakai statistik kumulatif, belum EWMA (paper: alpha = 0,8).
+2. (Selesai di mode distributed) Prediksi link memakai EWMA alpha = 0,8.
 3. Kapasitas link dan trafik latar belakang belum masuk TFTCap.
-4. Control plane ideal: link state, ACK, dan beban relay sampai ke semua node
-   pada batas interval tanpa biaya; overhead control plane belum dihitung.
+4. (Sebagian selesai) Link state dan ACK kini distributed. Pertukaran tabel
+   dan ACK dianggap selalu muat di setiap kontak (tidak memakai bandwidth atau
+   buffer data); jumlah ACK yang dikirim dicatat sebagai `ack_transmissions`.
+   Tanda tangan rute (HIBC) belum dimodelkan: ACK dianggap selalu lolos
+   verifikasi.
 5. TFTCap untuk link selain hop pertama memakai perkiraan pemakaian source sendiri.
 6. Pesan dikirim langsung bila tujuan sedang terhubung.
 

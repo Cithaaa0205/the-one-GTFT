@@ -11,6 +11,10 @@ import core.DTNHost;
 import core.Message;
 import core.MessageListener;
 import core.Settings;
+import core.SimClock;
+import routing.tft.LinkStateView;
+import routing.tft.NodeAckState;
+import routing.tft.NodeLinkState;
 import routing.tft.TftControlPlane;
 
 /**
@@ -36,8 +40,11 @@ import routing.tft.TftControlPlane;
  * Titik perluasan: epsilonAtSource() dan epsilonAtRelay(). Skema turunan
  * (misalnya HubAwareTftRouter) cukup menimpa kedua fungsi ini.
  *
- * TODO baseline: contrition, prediksi link dengan EWMA, kapasitas link dan
- * trafik latar belakang pada TFTCap.
+ * TODO baseline (lihat Fig. 4 dan Bagian IV paper): contrition, kapasitas link
+ * (Cap) dan trafik latar belakang (B_prev) pada TFTCap, serta model eksploitasi
+ * generosity oleh node selfish. Catatan: pada Fig. 4 TFTCap = min(forwarded(k))
+ * tanpa epsilon; di kode ini epsilon ikut dijumlahkan ke TFTCap (perlu
+ * dikonfirmasi). EWMA link state sudah diimplementasikan di LinkStateManager.
  */
 public class ShevadeTftRouter extends ActiveRouter
 		implements TftControlPlane.ShevadeRouterView {
@@ -72,9 +79,26 @@ public class ShevadeTftRouter extends ActiveRouter
 	private boolean replan;
 	private int lastReplanInterval = 0;
 
+	/** mode distributed: link state milik node ini (null pada mode ideal) */
+	private NodeLinkState nodeLinks = null;
+	/** mode distributed: ACK dan kredit TFT milik node ini (null pada mode ideal) */
+	private NodeAckState nodeAcks = null;
+	private double nextBoundary = 0;
+	private int acceptedThisInterval = 0;
+	/** tukar tabel satu langkah simulasi setelah batas interval, agar semua node sudah mengumumkan */
+	private boolean exchangePending = false;
+
 	/** penggunaan TFTCap oleh source ini pada interval berjalan, per link (A->B) */
 	private Map<Long, Integer> plannedUse = new HashMap<>();
 	private int plannedInterval = -1;
+	/**
+	 * Rute yang memakai kuota TFTCap pada interval berjalan, per ID pesan milik
+	 * sendiri. Hanya pencatatan; dipakai untuk melepas kuota saat replan di
+	 * tengah interval (lihat {@link #replanOwnMessagesMidInterval()}).
+	 */
+	private Map<String, int[]> allocThisInterval = new HashMap<>();
+	/** penanda per rute hasil planRoutes terakhir: true bila rute memakai kuota */
+	private List<Boolean> lastConsumed = new ArrayList<>();
 
 	public ShevadeTftRouter(Settings s) {
 		super(s);
@@ -105,6 +129,12 @@ public class ShevadeTftRouter extends ActiveRouter
 			deadline = (msgTtl > 0) ? msgTtl * 60.0 : 3600;
 		}
 		TftControlPlane.get().register(this);
+		if (cp().isDistributedLinkState()) {
+			nodeLinks = new NodeLinkState(host.getAddress(), cp().getEwmaAlpha(),
+					cp().getDegreeWindow(), cp().getPacketSize());
+			nodeAcks = new NodeAckState(cp().getAckTtl());
+			nextBoundary = cp().getInterval();
+		}
 	}
 
 	@Override
@@ -131,6 +161,120 @@ public class ShevadeTftRouter extends ActiveRouter
 		return n;
 	}
 
+	// ------------------------------------------------------------------
+	// Link state: mode ideal (global) atau distributed (per node)
+	// ------------------------------------------------------------------
+	/** Pandangan link state yang dipakai node ini untuk keputusan routing dan epsilon. */
+	protected LinkStateView linkView() {
+		return nodeLinks != null ? nodeLinks : cp();
+	}
+
+	private int currentLoad() {
+		return cp().isIntervalLoad() ? acceptedThisInterval : relayMessagesInBuffer();
+	}
+
+	/** Menutup interval milik node ini dan menukar tabel dengan tetangga yang sedang terhubung. */
+	private void distributedTick() {
+		if (exchangePending) {
+			exchangePending = false;
+			exchangeWithConnected();
+		}
+		double now = SimClock.getTime();
+		while (now >= nextBoundary) {
+			nodeLinks.closeInterval(nextBoundary, currentLoad());
+			nodeAcks.closeInterval(nextBoundary);
+			acceptedThisInterval = 0;
+			nextBoundary += cp().getInterval();
+			exchangePending = true;
+		}
+	}
+
+	private void exchangeWithConnected() {
+		int me = getHost().getAddress();
+		for (Connection c : getConnections()) {
+			DTNHost o = c.getOtherNode(getHost());
+			if (me < o.getAddress() && o.getRouter() instanceof ShevadeTftRouter) {
+				NodeLinkState theirs = ((ShevadeTftRouter) o.getRouter()).nodeLinks;
+				if (theirs != null) {
+					nodeLinks.exchangeWith(theirs);
+					onLinkStateReceived();
+					((ShevadeTftRouter) o.getRouter()).onLinkStateReceived();
+				}
+			}
+		}
+	}
+
+	// ------------------------------------------------------------------
+	// Kredit TFT dan ACK flooding
+	// ------------------------------------------------------------------
+	/** Kredit A di B (paket yang direlai A untuk B) menurut pengetahuan node ini, interval t-1. */
+	protected int credit(int upstreamA, int relayB) {
+		return nodeAcks != null ? nodeAcks.creditOf(upstreamA, relayB) : cp().creditOf(upstreamA, relayB);
+	}
+
+	/** Kredit yang dipakai relay untuk menegakkan TFT (lihat TftControlPlane.enforceWindow). */
+	private int enforcementCredit(int upstreamA, int relayB) {
+		if (!cp().enforceWithCurrentCredit()) {
+			return credit(upstreamA, relayB);
+		}
+		return nodeAcks != null ? nodeAcks.creditNow(upstreamA, relayB) : cp().creditNow(upstreamA, relayB);
+	}
+
+	/**
+	 * Saat kontak dimulai: kedua node saling mengirim ACK yang belum dimiliki
+	 * lawannya (satu hop). Penerima menyimpan ACK itu dan baru meneruskannya
+	 * pada langkah simulasi berikutnya.
+	 */
+	private void exchangeAcks(ShevadeTftRouter other) {
+		double now = SimClock.getTime();
+		List<NodeAckState.Ack> toOther = nodeAcks.missingIn(other.nodeAcks, now);
+		List<NodeAckState.Ack> toMe = other.nodeAcks.missingIn(nodeAcks, now);
+		for (NodeAckState.Ack a : toOther) {
+			if (other.nodeAcks.receive(a, now)) {
+				cp().countAckTransmission();
+			}
+		}
+		for (NodeAckState.Ack a : toMe) {
+			if (nodeAcks.receive(a, now)) {
+				cp().countAckTransmission();
+			}
+		}
+	}
+
+	/**
+	 * Setiap langkah simulasi: ACK yang diterima pada langkah sebelumnya
+	 * diteruskan ke node yang sedang berkontak dengan node ini (satu hop).
+	 */
+	private void forwardPendingAcks() {
+		double now = SimClock.getTime();
+		if (!nodeAcks.hasPending()) {
+			return;
+		}
+		List<NodeAckState.Ack> out = nodeAcks.takeForwardable(now);
+		if (out.isEmpty()) {
+			return;
+		}
+		for (Connection c : getConnections()) {
+			if (!c.isUp() || !(c.getOtherNode(getHost()).getRouter() instanceof ShevadeTftRouter)) {
+				continue;
+			}
+			ShevadeTftRouter o = (ShevadeTftRouter) c.getOtherNode(getHost()).getRouter();
+			if (o.nodeAcks == null) {
+				continue;
+			}
+			for (NodeAckState.Ack a : out) {
+				if (o.nodeAcks.receive(a, now)) {
+					cp().countAckTransmission();
+				}
+			}
+		}
+	}
+
+	/** Diagnostik/uji (hanya baca): apakah node ini sudah menerima ACK dengan ID ini. */
+	public boolean knowsAck(String id) {
+		return nodeAcks != null && nodeAcks.knows(id);
+	}
+
 	/** Dipakai skema turunan untuk memastikan mekanisme TFT aktif. */
 	protected void forceMode(Mode m) {
 		this.mode = m;
@@ -151,6 +295,23 @@ public class ShevadeTftRouter extends ActiveRouter
 	public void changedConnection(Connection con) {
 		DTNHost other = con.getOtherNode(getHost());
 		int a = getHost().getAddress(), b = other.getAddress();
+		if (nodeLinks != null) { // mode distributed: tiap node mencatat kontaknya sendiri
+			double now = SimClock.getTime();
+			if (con.isUp()) {
+				nodeLinks.onConnectionUp(b, now, con.getSpeed());
+				if (a < b && other.getRouter() instanceof ShevadeTftRouter) {
+					NodeLinkState theirs = ((ShevadeTftRouter) other.getRouter()).nodeLinks;
+					if (theirs != null) {
+						nodeLinks.exchangeWith(theirs); // tukar tabel saat kontak dimulai
+						exchangeAcks((ShevadeTftRouter) other.getRouter());
+						onLinkStateReceived();
+						((ShevadeTftRouter) other.getRouter()).onLinkStateReceived();
+					}
+				}
+			} else {
+				nodeLinks.onConnectionDown(b, now);
+			}
+		}
 		if (a > b) {
 			return; // dicatat sekali per pasangan
 		}
@@ -177,7 +338,9 @@ public class ShevadeTftRouter extends ActiveRouter
 	public boolean createNewMessage(Message m) {
 		cp().tick();
 		List<int[]> routes = planRoutes(m, repFactor);
+		List<Boolean> used = lastConsumed;
 		m.addProperty(ROUTE_P, routes.get(0));
+		noteAlloc(m.getId(), routes.get(0), used, 0);
 		m.addProperty(ORIG_P, m.getId());
 		boolean ok = super.createNewMessage(m);
 		for (int k = 1; k < routes.size(); k++) {
@@ -185,6 +348,7 @@ public class ShevadeTftRouter extends ActiveRouter
 			rep.addProperty(ROUTE_P, routes.get(k));
 			rep.addProperty(ORIG_P, m.getId());
 			rep.addProperty(REPLICA_P, Boolean.TRUE);
+			noteAlloc(rep.getId(), routes.get(k), used, k);
 			super.createNewMessage(rep);
 		}
 		return ok;
@@ -195,6 +359,7 @@ public class ShevadeTftRouter extends ActiveRouter
 		int src = getHost().getAddress();
 		int dst = m.getTo().getAddress();
 		List<int[]> chosen = new ArrayList<>();
+		lastConsumed = new ArrayList<>();
 
 		if (mode == Mode.SELFISH_NOTFT) {
 			chosen.add(new int[] { src, dst });
@@ -203,6 +368,7 @@ public class ShevadeTftRouter extends ActiveRouter
 
 		if (plannedInterval != cp().getIntervalIndex()) {
 			plannedUse = new HashMap<>();
+			allocThisInterval = new HashMap<>();
 			plannedInterval = cp().getIntervalIndex();
 		}
 
@@ -223,6 +389,7 @@ public class ShevadeTftRouter extends ActiveRouter
 			if (tftCap(p.nodes) >= 1) {
 				consume(p.nodes);
 				chosen.add(p.nodes);
+				lastConsumed.add(Boolean.TRUE);
 				cp().recordPlan(p.nodes);
 			}
 		}
@@ -245,7 +412,7 @@ public class ShevadeTftRouter extends ActiveRouter
 		if (cur.size() - 1 >= maxHops) {
 			return;
 		}
-		for (int nb : cp().neighbors(node)) {
+		for (int nb : linkView().neighbors(node)) {
 			if (cur.contains(nb)) {
 				continue;
 			}
@@ -264,7 +431,7 @@ public class ShevadeTftRouter extends ActiveRouter
 	private double deliveryLowerBound(int[] nodes) {
 		double mu = 0, var = 0;
 		for (int i = 0; i + 1 < nodes.length; i++) {
-			double[] st = cp().linkStats(nodes[i], nodes[i + 1]);
+			double[] st = linkView().linkStats(nodes[i], nodes[i + 1]);
 			if (st == null) {
 				return 0;
 			}
@@ -306,7 +473,7 @@ public class ShevadeTftRouter extends ActiveRouter
 		int cap = Integer.MAX_VALUE;
 		for (int i = 0; i + 2 < nodes.length; i++) {
 			int a = nodes[i], b = nodes[i + 1];
-			int budget = cp().creditOf(a, b) + epsilonAtSource(b, a)
+			int budget = credit(a, b) + epsilonAtSource(b, a)
 					- plannedUse.getOrDefault(linkKey(a, b), 0);
 			cap = Math.min(cap, budget);
 		}
@@ -336,7 +503,7 @@ public class ShevadeTftRouter extends ActiveRouter
 			if (tftActive()) {
 				int b = getHost().getAddress(), a = from.getAddress();
 				int eps = epsilonAtRelay(b, a);
-				int allowed = cp().creditOf(a, b) + eps;
+				int allowed = enforcementCredit(a, b) + eps;
 				boolean deny = cp().servedNow(b, a) >= allowed;
 				cp().recordEpsCheck(b, eps, deny);
 				if (deny) {
@@ -359,8 +526,13 @@ public class ShevadeTftRouter extends ActiveRouter
 				path[i] = hops.get(i).getAddress();
 			}
 			cp().recordAck(path);
+			if (nodeAcks != null) { // tujuan membuat ACK lalu mem-flood-nya
+				NodeAckState.Ack ack = new NodeAckState.Ack(m.getId(), path, SimClock.getTime());
+				nodeAcks.receive(ack, SimClock.getTime()); // diteruskan mulai langkah berikutnya
+			}
 		} else {
 			cp().recordServed(getHost().getAddress(), from.getAddress());
+			acceptedThisInterval++;
 		}
 		return m;
 	}
@@ -372,6 +544,10 @@ public class ShevadeTftRouter extends ActiveRouter
 	public void update() {
 		super.update();
 		cp().tick();
+		if (nodeLinks != null) {
+			distributedTick();
+			forwardPendingAcks();
+		}
 		if (replan && mode != Mode.SELFISH_NOTFT
 				&& cp().getIntervalIndex() != lastReplanInterval) {
 			lastReplanInterval = cp().getIntervalIndex();
@@ -402,7 +578,58 @@ public class ShevadeTftRouter extends ActiveRouter
 		for (Message m : own) {
 			List<int[]> r = planRoutes(m, 1);
 			m.updateProperty(ROUTE_P, r.get(0));
+			noteAlloc(m.getId(), r.get(0), lastConsumed, 0);
 		}
+	}
+
+	private void noteAlloc(String id, int[] route, List<Boolean> used, int k) {
+		if (k < used.size() && used.get(k)) {
+			allocThisInterval.put(id, route);
+		} else {
+			allocThisInterval.remove(id);
+		}
+	}
+
+	/**
+	 * Replan di tengah interval: kuota TFTCap milik pesan sendiri yang masih
+	 * menunggu di buffer dilepas dulu (agar tidak terhitung dua kali), lalu
+	 * Fig. 4 dijalankan ulang dengan link state terbaru milik node ini.
+	 * Kuota pesan yang sudah dikirim pada interval ini tetap terhitung.
+	 */
+	protected void replanOwnMessagesMidInterval() {
+		if (mode == Mode.SELFISH_NOTFT || plannedInterval != cp().getIntervalIndex()) {
+			replanOwnMessages(); // belum ada alokasi di interval ini
+			return;
+		}
+		List<Message> own = new ArrayList<>();
+		for (Message m : getMessageCollection()) {
+			// pesan yang sedang ditransfer tetap memakai rute lamanya, jadi kuotanya tidak dilepas
+			if (m.getFrom() != getHost() || isSending(m.getId())) {
+				continue;
+			}
+			own.add(m);
+			int[] r = allocThisInterval.remove(m.getId());
+			if (r != null) {
+				for (int i = 0; i + 2 < r.length; i++) {
+					long k = linkKey(r[i], r[i + 1]);
+					plannedUse.merge(k, -1, Integer::sum);
+					assert plannedUse.get(k) >= 0 : "kuota TFTCap negatif pada link " + r[i] + "->" + r[i + 1];
+				}
+			}
+		}
+		sortByQueueMode(own);
+		for (Message m : own) {
+			List<int[]> r = planRoutes(m, 1);
+			m.updateProperty(ROUTE_P, r.get(0));
+			noteAlloc(m.getId(), r.get(0), lastConsumed, 0);
+		}
+	}
+
+	/**
+	 * Dipanggil setiap kali node ini menerima tabel link state dari node yang
+	 * ditemuinya (hanya mode distributed). Baseline tidak melakukan apa-apa.
+	 */
+	protected void onLinkStateReceived() {
 	}
 
 	private void forwardAlongRoutes() {

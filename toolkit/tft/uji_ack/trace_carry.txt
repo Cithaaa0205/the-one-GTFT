@@ -1,0 +1,7 @@
+10 CONN 3 0 up
+20 C M1 3 0 10000
+100 CONN 3 0 down
+500 CONN 0 1 up
+550 CONN 0 1 down
+800 CONN 1 2 up
+900 CONN 1 2 down
