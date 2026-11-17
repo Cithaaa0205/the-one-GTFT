@@ -5,7 +5,7 @@ Satu repository untuk dua skripsi:
 | Bagian | Pemilik | Isi |
 |---|---|---|
 | **Baseline** | Angel | Replikasi incentive-aware routing Shevade dkk. (2008) di jaringan manusia |
-| **Hub-aware** | Citha | Generosity adaptif `epsilon = floor(epsBase * S * K)` di atas baseline |
+| **Hub-aware** | Citha | Generosity adaptif `epsilon = bulatkan(epsBase * S * K)` di atas baseline |
 | **Bersama** | Berdua | Control plane, laporan metrik, parameter skenario |
 
 Router hub-aware **mewarisi** router baseline dan hanya mengganti dua fungsi
