@@ -1,78 +1,126 @@
-# The ONE Sanata Dharma University Mod
+# Penelitian Payung: Incentive-Aware Routing Shevade dkk. + Hub-Aware TFT
 
-A modified [The ONE Simulator](https://github.com/knightcode/the-one-pitt) 
-repository by students of Sanata Dharma University (Jarkom).
+Satu repository untuk dua skripsi:
 
-The ONE is an Opportunistic Network Environment simulator that provides a
-powerful tool for generating mobility traces, running DTN messaging
-simulations with different routing protocols, and visualizing both
-simulations interactively in real-time and results after their completion.
+| Bagian | Pemilik | Isi |
+|---|---|---|
+| **Baseline** | Angel | Replikasi incentive-aware routing Shevade dkk. (2008) di jaringan manusia |
+| **Hub-aware** | Citha | Generosity adaptif `epsilon = floor(epsBase * S * K)` di atas baseline |
+| **Bersama** | Berdua | Control plane, laporan metrik, parameter skenario |
 
-## Complete Information
+Router hub-aware **mewarisi** router baseline dan hanya mengganti dua fungsi
+epsilon. Semua perbaikan baseline (misalnya contrition) otomatis ikut terpakai,
+dan perbandingan dijamin adil karena satu-satunya perbedaan adalah epsilon.
 
-Please read this repository's [**wiki**](https://github.com/Trustacean/the-one-sdu-mod/wiki).
+## Struktur
 
-## Compiling and Running
-
-On Windows, run `compile.bat` to compile. Then run `one.bat [args]` to run the simulator.
-
-The modern batch folders are meant for Windows, `.sh` files are available for linux, but is outdated.
-
-### Quick Running
-
-Windows, with GUI:
 ```
-.\one.bat 1 [path-to-setting-file]
-```
-Windows, batch mode (no GUI):
-```
-.\one.bat -b 1 [path-to-setting-file]
+src/routing/
+  ShevadeTftRouter.java        BASELINE   source routing, Chebyshev, Fig. 4, aturan TFT
+  HubAwareTftRouter.java       HUB-AWARE  extends ShevadeTftRouter, menimpa epsilon
+  tft/TftControlPlane.java     BERSAMA    link state, kredit ACK, derajat, beban relay
+  hubaware/HubAwareFactors.java HUB-AWARE faktor S, K, dan epsilon adaptif
+src/report/
+  TftLoadReport.java           BERSAMA    semua metrik evaluasi
+settings/
+  common/tft_common.cfg        BERSAMA    skenario, trace, interval, pesan, laporan
+  common/trace_haggle.cfg      BERSAMA    override trace manusia Haggle
+  baseline/baseline.cfg        BASELINE   COOP_NOTFT, SELFISH_NOTFT, GTFT
+  hubaware/hubaware.cfg        HUB-AWARE  REACTIVE, PROACTIVE, S_ONLY, K_ONLY
+toolkit/tft/
+  gen_hub_trace.py             trace sintetis dua hub
+  run_seeds.py                 jalankan kedua bagian untuk banyak seed + ringkasan
+  summarize.py                 rangkum satu folder laporan
+data/events/tft_hub_trace.txt  trace sintetis seed 1
 ```
 
-Configuring running with multiple parameters are elaborated in
-[wiki#configuring](https://github.com/Trustacean/the-one-sdu-mod/wiki#configuring)
-and [wiki#running](https://github.com/Trustacean/the-one-sdu-mod/wiki#running).
+## Titik perluasan baseline
 
-## Project Structure
+```java
+// ShevadeTftRouter (baseline): konstan
+protected int epsilonAtSource(int relayB, int upstreamA) { return epsBase; }
+protected int epsilonAtRelay(int relayB, int upstreamA)  { return epsBase; }
 
-This repository is organized to directories as follows:
+// HubAwareTftRouter (Citha): adaptif
+@Override protected int epsilonAtSource(int b, int a) {
+    return variant == REACTIVE ? super.epsilonAtSource(b, a)
+                               : factors.epsilon(epsBase, b, a);
+}
+@Override protected int epsilonAtRelay(int b, int a) {
+    return factors.epsilon(epsBase, b, a);
+}
 ```
-.
-├───data                         ### 
-│   ├───events                   # Events related data
-│   └───spatial                  # Routes related data (MapBased)
-│       ├───cluster              # cluster route
-│       ├───HelsinkiMedium       # helsinki's routes
-│       └───Manhattan            # manhattan's routes
-├───lib                          ### LOCAL LIBRARIES USED FOR CLASSPATH
-├───reports                      ### OUTPUT DIRECTORY FOR REPORTS
-├───settings                     ### SETTINGS GROUPING
-│   ├───demos                    # Feature demos
-│   ├───examples                 # Examples
-│   ├───wdm_settings             # WDM (idk what these are)
-│   ├───default_settings.cfg     # default setting, don't delete/modify
-│   └───demo.cfg                 # demo setting
-├───src                          ### SOURCE FILES
-│   ├───applications             # application implementations
-│   ├───core                     # simulator core classes
-│   ├───gui                      # simulator GUI files
-│   ├───input                    # simulator inputs
-│   ├───interfaces               # simulator interfaces
-│   ├───movement                 # movement models
-│   ├───reinforcement            # reinforcement utility
-│   ├───report                   # reporting files
-│   ├───routing                  # forwarding algorithms
-│   ├───test                     # simulator tests
-│   └───ui                       # simulator text UI stuff
-├───target                       ### JAVA BINARY OUTPUT DIRECTORY
-└───toolkit                      ### LEGACY GRAPHING KIT
+
+## Cara menjalankan
+
+Windows (dari folder proyek):
 ```
-Strictly follow the above structure.
+compile.bat
+one.bat -b 3 settings\common\tft_common.cfg settings\baseline\baseline.cfg
+one.bat -b 4 settings\common\tft_common.cfg settings\hubaware\hubaware.cfg
+python toolkit\tft\summarize.py reports\tft
+```
 
-## Important Note
+Banyak seed sekaligus (kedua bagian, 5 seed):
+```
+python toolkit\tft\run_seeds.py --seeds 5 --one one.bat
+```
+Opsi: `--load interval|buffer`, `--replan true|false`, `--capacity 20`,
+`--only baseline|hubaware`. Ringkasan tersimpan di
+`reports\tft_seeds\<konfigurasi>\ringkasan.csv`.
 
-This modern repository uses **Java SDK 21** (LTS) to both compile and run the simulator.
-Older versions of Java SDK are not supported. If you want to use the older versions,
-refer to the legacy repositories at:
-- https://github.com/knightcode/the-one-pitt 
-- https://github.com/akeranen/the-one.
+Trace manusia Haggle: tambahkan `settings\common\trace_haggle.cfg` di urutan
+terakhir perintah `one.bat`.
+
+## Parameter
+
+| Setting | Pemilik | Arti |
+|---|---|---|
+| `TftControlPlane.interval` | bersama | panjang interval TFT (detik) |
+| `TftControlPlane.degreeWindow` | bersama | jendela derajat kontak (detik) |
+| `TftControlPlane.loadMetric` | bersama | `interval` (paket relay per interval) atau `buffer` |
+| `TftControlPlane.relayCapacity` | bersama | kapasitas relay C |
+| `ShevadeTftRouter.scheme` | baseline | `COOP_NOTFT`, `SELFISH_NOTFT`, `GTFT` |
+| `ShevadeTftRouter.epsBase` | baseline | epsilon konstan = epsilon dasar hub-aware |
+| `ShevadeTftRouter.repFactor` | baseline | jumlah salinan per pesan |
+| `ShevadeTftRouter.maxHops` | baseline | batas hop jalur kandidat (3) |
+| `ShevadeTftRouter.deadline` | baseline | deadline Chebyshev; -1 = TTL |
+| `ShevadeTftRouter.replanEachInterval` | baseline | Fig. 4 diulang tiap interval |
+| `HubAwareTftRouter.variant` | hub-aware | `REACTIVE`, `PROACTIVE`, `S_ONLY`, `K_ONLY` |
+| `HubAwareTftRouter.sMax` | hub-aware | batas atas faktor strata |
+| `TftLoadReport.hubFraction` | bersama | porsi node yang dianggap hub untuk evaluasi |
+
+## Metrik (TftLoadReport)
+
+`delivery_ratio`, `avg_delay`, `overhead_ratio`, `tft_drops`,
+`gini_relay_load` (semua node), `gini_among_hubs`, `max_relay_load`,
+`hub_share`, `hub_utilization`, serta per node: `unique_contacts`,
+`relay_load`, `planned_by_sources`, `avg_eps_checked`, `tft_denials`.
+
+## Hasil acuan (trace sintetis, 5 seed, beban per interval, C = 20)
+
+Dipakai sebagai uji regresi: setelah mengubah kode, hasil skenario yang sama
+harus tetap sama kecuali perubahannya memang disengaja.
+
+| Skema | Delivery | Dibuang | Gini semua | Gini antar-hub | Beban maks. |
+|---|---|---|---|---|---|
+| baseline_COOP_NOTFT | 0,974 | 0 | 0,900 | 0,447 | 1338 |
+| baseline_SELFISH_NOTFT | 0,162 | 0 | 0,000 | 0,000 | 0 |
+| baseline_GTFT | 0,841 | 155 | 0,785 | 0,232 | 911 |
+| hubaware_REACTIVE | 0,722 | 329 | 0,768 | 0,187 | 735 |
+| hubaware_PROACTIVE | 0,928 | 38 | 0,826 | 0,185 | 912 |
+| hubaware_S_ONLY | 0,968 | 8 | 0,892 | 0,415 | 1288 |
+| hubaware_K_ONLY | 0,580 | 272 | 0,603 | 0,156 | 495 |
+
+## Penyederhanaan yang masih ada (TODO)
+
+Baseline:
+1. Contrition belum diimplementasikan.
+2. Prediksi link memakai statistik kumulatif, belum EWMA (paper: alpha = 0,8).
+3. Kapasitas link dan trafik latar belakang belum masuk TFTCap.
+4. Control plane ideal: link state, ACK, dan beban relay sampai ke semua node
+   pada batas interval tanpa biaya; overhead control plane belum dihitung.
+5. TFTCap untuk link selain hop pertama memakai perkiraan pemakaian source sendiri.
+6. Pesan dikirim langsung bila tujuan sedang terhubung.
+
+Hub-aware: tidak ada perubahan di luar fungsi epsilon.
